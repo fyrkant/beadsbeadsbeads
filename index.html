@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hama Bead Plate</title>
+<style>
+  :root { --bg:#faf7f2; --fg:#222; --muted:#777; --accent:#e4572e; --card:#fff; --line:#ddd; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1c1b1a; --fg:#eee; --muted:#999; --card:#262524; --line:#444; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:960px; margin:0 auto; padding:16px; }
+  h1 { margin:0 0 12px; font-size:22px; }
+  #drop { border:3px dashed var(--line); border-radius:12px; padding:36px 16px; text-align:center; color:var(--muted); cursor:pointer; background:var(--card); }
+  #drop.over { border-color:var(--accent); color:var(--accent); }
+  #controls { display:none; gap:16px; flex-wrap:wrap; align-items:center; margin:16px 0; padding:12px; background:var(--card); border:1px solid var(--line); border-radius:10px; }
+  #controls label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+  #controls label.row { flex-direction:row; align-items:center; gap:6px; }
+  input[type=range] { width:160px; }
+  button { font:inherit; padding:8px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.sec { background:var(--line); color:var(--fg); }
+  #result { display:none; }
+  #info { color:var(--muted); margin:8px 0; }
+  #wrap { background:#fff; padding:8px; border:1px solid var(--line); border-radius:8px; overflow:auto; }
+  canvas { display:block; max-width:100%; height:auto; margin:0 auto; }
+  #legend { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:6px 12px; margin-top:16px; padding:0; list-style:none; }
+  #legend li { display:flex; align-items:center; gap:8px; }
+  .sw { width:22px; height:22px; border-radius:50%; border:1px solid #0004; display:grid; place-items:center; font:bold 12px monospace; flex:none; }
+  @media print {
+    body { background:#fff; color:#000; }
+    #drop, #controls, h1, .noprint { display:none !important; }
+    main { padding:0; max-width:none; }
+    #wrap { border:0; padding:0; overflow:visible; }
+    #legend { break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hama Bead Plate</h1>
+  <div id="drop">Drop an image here, click, or paste (Ctrl+V)<input id="file" type="file" accept="image/*" hidden></div>
+
+  <div id="controls">
+    <label>Width: <b id="wv">29</b> beads
+      <input id="w" type="range" min="8" max="116" value="29">
+    </label>
+    <label>Max colours: <b id="cv">all</b>
+      <input id="c" type="range" min="2" max="30" value="30">
+    </label>
+    <label class="row"><input id="sym" type="checkbox" checked> Symbols</label>
+    <label class="row"><input id="dither" type="checkbox"> Dithering</label>
+    <button id="print">Print</button>
+  </div>
+
+  <div id="result">
+    <div id="info"></div>
+    <div id="wrap"><canvas id="out"></canvas></div>
+    <ul id="legend"></ul>
+  </div>
+</main>
+
+<script>
+// Approximate Hama Midi colours. [name, hex]
+const PALETTE = [
+  ["01 White","#f2f2ee"],["02 Cream","#f2e3b0"],["03 Yellow","#f6d60b"],["04 Orange","#ee6a1c"],["05 Red","#c4162a"],
+  ["06 Pink","#f09ab8"],["07 Purple","#6f3a8f"],["08 Blue","#1f4fa3"],["09 Light Blue","#3a8fd0"],["10 Green","#1e8a4b"],
+  ["11 Light Green","#7cc242"],["12 Brown","#6a3f27"],["13 Grey","#9d9fa2"],["14 Black","#1c1c1c"],["Dark Green","#16513a"],
+  ["Light Brown","#b27a4b"],["Flesh","#f1c3a0"],["Dark Grey","#555555"],["Navy","#14264f"],["Dark Red","#7a1020"],
+  ["Turquoise","#0aa3a8"],["Lilac","#b79ad3"],["Peach","#f7a58a"],["Pastel Yellow","#f7ec8a"],["Pastel Green","#a8e0b8"],
+  ["Pastel Blue","#a9cdf0"],["Pastel Pink","#f9cfe0"],["Neon Pink","#ec2f8c"],["Rust","#a8553a"],["Sand","#d8c39a"],
+];
+const SYMS = "●■▲◆★✚✖♥♦♣♠○□△◇☆+xo#@%&*=?~!ABCDEFGH".split("");
+const lab = rgb => {
+  let [r,g,b] = rgb.map(v => { v/=255; return v>.04045 ? ((v+.055)/1.055)**2.4 : v/12.92; });
+  let x=(r*.4124+g*.3576+b*.1805)/.95047, y=(r*.2126+g*.7152+b*.0722), z=(r*.0193+g*.1192+b*.9505)/1.08883;
+  const f = t => t>.008856 ? Math.cbrt(t) : 7.787*t+16/116;
+  [x,y,z]=[f(x),f(y),f(z)];
+  return [116*y-16, 500*(x-y), 200*(y-z)];
+};
+const hex2rgb = h => [1,3,5].map(i => parseInt(h.substr(i,2),16));
+PALETTE.forEach(p => { p.rgb = hex2rgb(p[1]); p.lab = lab(p.rgb); });
+const dist = (a,b) => (a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2;
+
+const $ = id => document.getElementById(id);
+let img = null;
+
+function nearest(l, allowed) {
+  let best = -1, bd = Infinity;
+  for (const i of allowed) { const d = dist(l, PALETTE[i].lab); if (d < bd) { bd = d; best = i; } }
+  return best;
+}
+
+function render() {
+  if (!img) return;
+  const W = +$("w").value, H = Math.max(1, Math.round(W * img.height / img.width));
+  const tmp = document.createElement("canvas"); tmp.width = W; tmp.height = H;
+  const tc = tmp.getContext("2d", { willReadFrequently: true });
+  tc.fillStyle = "#fff"; tc.fillRect(0,0,W,H);
+  tc.imageSmoothingQuality = "high"; tc.drawImage(img, 0, 0, W, H);
+  const px = tc.getImageData(0,0,W,H).data;
+
+  const all = PALETTE.map((_,i)=>i);
+  const maxC = +$("c").value;
+  $("cv").textContent = maxC >= 30 ? "all" : maxC;
+  const dither = $("dither").checked;
+
+  // pass 1: nearest on full palette (for color reduction)
+  const labs = [];
+  for (let i = 0; i < W*H; i++) labs.push(lab([px[i*4],px[i*4+1],px[i*4+2]]));
+  let allowed = all;
+  if (maxC < 30) {
+    const cnt = {};
+    labs.forEach(l => { const k = nearest(l, all); cnt[k] = (cnt[k]||0)+1; });
+    allowed = Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]).slice(0,maxC).map(Number);
+  }
+
+  // pass 2: map (optional Floyd–Steinberg in Lab)
+  const grid = new Array(W*H);
+  const buf = labs.map(l => l.slice());
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y*W+x, k = nearest(buf[i], allowed);
+    grid[i] = k;
+    if (dither) {
+      const e = buf[i].map((v,j) => v - PALETTE[k].lab[j]);
+      const add = (xx,yy,f) => { if (xx>=0&&xx<W&&yy<H) buf[yy*W+xx] = buf[yy*W+xx].map((v,j)=>v+e[j]*f); };
+      add(x+1,y,7/16); add(x-1,y+1,3/16); add(x,y+1,5/16); add(x+1,y+1,1/16);
+    }
+  }
+
+  // legend order: by count
+  const counts = {};
+  grid.forEach(k => counts[k] = (counts[k]||0)+1);
+  const used = Object.keys(counts).map(Number).sort((a,b)=>counts[b]-counts[a]);
+  const sym = {}; used.forEach((k,i) => sym[k] = SYMS[i % SYMS.length]);
+  const showSym = $("sym").checked;
+
+  // draw
+  const S = 24, cv = $("out");
+  cv.width = W*S; cv.height = H*S;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0,0,cv.width,cv.height);
+  g.textAlign = "center"; g.textBaseline = "middle"; g.font = `bold ${S*.5}px monospace`;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const k = grid[y*W+x], cx = x*S+S/2, cy = y*S+S/2;
+    g.fillStyle = PALETTE[k][1];
+    g.beginPath(); g.arc(cx, cy, S*.45, 0, 7); g.fill();
+    g.strokeStyle = "#0003"; g.lineWidth = 1; g.stroke();
+    g.fillStyle = "#fff"; g.beginPath(); g.arc(cx, cy, S*.1, 0, 7); g.fill();
+    if (showSym) {
+      const [r,gg,b] = PALETTE[k].rgb, dark = (r*.299+gg*.587+b*.114) < 140;
+      g.fillStyle = dark ? "#fff" : "#000";
+      g.fillText(sym[k], cx, cy + 1);
+    }
+  }
+  // grid lines: thin every bead, thick every 5, plate borders every 29
+  for (let x = 0; x <= W; x++) line(g, x*S, 0, x*S, H*S, x%29===0 ? 3 : x%5===0 ? 1.2 : 0.4, x%29===0 ? "#e4572e" : "#0006");
+  for (let y = 0; y <= H; y++) line(g, 0, y*S, W*S, y*S, y%29===0 ? 3 : y%5===0 ? 1.2 : 0.4, y%29===0 ? "#e4572e" : "#0006");
+
+  const plates = Math.ceil(W/29) * Math.ceil(H/29);
+  $("info").textContent = `${W} × ${H} beads · ${W*H} total · ${used.length} colours · ${plates} plate(s) (29×29, red lines)`;
+  $("legend").innerHTML = used.map(k => {
+    const [r,gg,b] = PALETTE[k].rgb, dark = (r*.299+gg*.587+b*.114) < 140;
+    return `<li><span class="sw" style="background:${PALETTE[k][1]};color:${dark?"#fff":"#000"}">${showSym?sym[k]:""}</span>${PALETTE[k][0]} — <b>${counts[k]}</b></li>`;
+  }).join("");
+  $("result").style.display = "block"; $("controls").style.display = "flex";
+}
+function line(g,x1,y1,x2,y2,w,c){ g.strokeStyle=c; g.lineWidth=w; g.beginPath(); g.moveTo(x1,y1); g.lineTo(x2,y2); g.stroke(); }
+
+function load(file) {
+  if (!file || !file.type.startsWith("image/")) return;
+  const url = URL.createObjectURL(file), im = new Image();
+  im.onload = () => { img = im; render(); URL.revokeObjectURL(url); };
+  im.src = url;
+}
+
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+$("file").onchange = e => load(e.target.files[0]);
+["dragenter","dragover"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+document.addEventListener("drop", e => load(e.dataTransfer.files[0]));
+document.addEventListener("paste", e => { const f = [...e.clipboardData.files][0]; if (f) load(f); });
+$("w").oninput = () => { $("wv").textContent = $("w").value; render(); };
+["c","sym","dither"].forEach(id => $(id).oninput = render);
+$("print").onclick = () => window.print();
+</script>
+</body>
+</html>
