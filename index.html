@@ -47,6 +47,9 @@
     <label>Max colours: <b id="cv">all</b>
       <input id="c" type="range" min="2" max="30" value="30">
     </label>
+    <label>Make light areas white: <b id="whv">off</b>
+      <input id="wh" type="range" min="0" max="60" value="0">
+    </label>
     <label class="row"><input id="sym" type="checkbox" checked> Symbols</label>
     <label class="row"><input id="dither" type="checkbox"> Dithering</label>
     <button id="print">Print</button>
@@ -104,21 +107,29 @@ function render() {
   $("cv").textContent = maxC >= 30 ? "all" : maxC;
   const dither = $("dither").checked;
 
+  // pixels lighter than the cutoff become white (palette 0)
+  const wv = +$("wh").value, cutoff = wv ? 100 - wv : Infinity;
+  $("whv").textContent = wv ? wv + "%" : "off";
+  const isWhite = [];
+
   // pass 1: nearest on full palette (for color reduction)
   const labs = [];
-  for (let i = 0; i < W*H; i++) labs.push(lab([px[i*4],px[i*4+1],px[i*4+2]]));
+  for (let i = 0; i < W*H; i++) { const l = lab([px[i*4],px[i*4+1],px[i*4+2]]); labs.push(l); isWhite.push(l[0] >= cutoff); }
   let allowed = all;
   if (maxC < 30) {
     const cnt = {};
-    labs.forEach(l => { const k = nearest(l, all); cnt[k] = (cnt[k]||0)+1; });
-    allowed = Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]).slice(0,maxC).map(Number);
+    labs.forEach((l,i) => { if (isWhite[i]) return; const k = nearest(l, all); cnt[k] = (cnt[k]||0)+1; });
+    const top = Object.keys(cnt).map(Number).filter(k => !wv || k !== 0).sort((a,b)=>cnt[b]-cnt[a]);
+    allowed = wv ? [0, ...top.slice(0, maxC-1)] : top.slice(0, maxC);
   }
 
   // pass 2: map (optional Floyd–Steinberg in Lab)
   const grid = new Array(W*H);
   const buf = labs.map(l => l.slice());
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const i = y*W+x, k = nearest(buf[i], allowed);
+    const i = y*W+x;
+    if (isWhite[i]) { grid[i] = 0; continue; }
+    const k = nearest(buf[i], allowed);
     grid[i] = k;
     if (dither) {
       const e = buf[i].map((v,j) => v - PALETTE[k].lab[j]);
@@ -181,7 +192,7 @@ $("file").onchange = e => load(e.target.files[0]);
 document.addEventListener("drop", e => load(e.dataTransfer.files[0]));
 document.addEventListener("paste", e => { const f = [...e.clipboardData.files][0]; if (f) load(f); });
 $("w").oninput = () => { $("wv").textContent = $("w").value; render(); };
-["c","sym","dither"].forEach(id => $(id).oninput = render);
+["c","wh","sym","dither"].forEach(id => $(id).oninput = render);
 $("print").onclick = () => window.print();
 </script>
 </body>
