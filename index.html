@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pärlplatta</title>
+<style>
+  :root { --bg:#faf7f2; --fg:#222; --muted:#777; --accent:#e4572e; --card:#fff; --line:#ddd; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1c1b1a; --fg:#eee; --muted:#999; --card:#262524; --line:#444; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:960px; margin:0 auto; padding:16px; }
+  h1 { margin:0 0 12px; font-size:22px; }
+  #drop { border:3px dashed var(--line); border-radius:12px; padding:36px 16px; text-align:center; color:var(--muted); cursor:pointer; background:var(--card); }
+  #drop.over { border-color:var(--accent); color:var(--accent); }
+  #controls { display:none; gap:16px; flex-wrap:wrap; align-items:center; margin:16px 0; padding:12px; background:var(--card); border:1px solid var(--line); border-radius:10px; }
+  #controls label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+  #controls label.row { flex-direction:row; align-items:center; gap:6px; }
+  input[type=range] { width:160px; }
+  button { font:inherit; padding:8px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.sec { background:var(--line); color:var(--fg); }
+  #result { display:none; }
+  #info { color:var(--muted); margin:8px 0; }
+  #wrap { background:#fff; padding:8px; border:1px solid var(--line); border-radius:8px; overflow:auto; }
+  canvas { display:block; max-width:100%; height:auto; margin:0 auto; }
+  #legend { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:6px 12px; margin-top:16px; padding:0; list-style:none; }
+  #legend li { display:flex; align-items:center; gap:8px; }
+  .sw { width:22px; height:22px; border-radius:50%; border:1px solid #0004; display:grid; place-items:center; font:bold 12px monospace; flex:none; }
+  @media print {
+    body { background:#fff; color:#000; }
+    #drop, #controls, h1, .noprint { display:none !important; }
+    main { padding:0; max-width:none; }
+    #wrap { border:0; padding:0; overflow:visible; }
+    #legend { break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pärlplatta</h1>
+  <div id="drop">Släpp en bild här, klicka eller klistra in (Ctrl+V)<input id="file" type="file" accept="image/*" hidden></div>
+
+  <div id="controls">
+    <label>Bredd: <b id="wv">29</b> pärlor
+      <input id="w" type="range" min="8" max="116" value="29">
+    </label>
+    <label>Max antal färger: <b id="cv">alla</b>
+      <input id="c" type="range" min="2" max="30" value="30">
+    </label>
+    <label class="row"><input id="sym" type="checkbox" checked> Symboler</label>
+    <label class="row"><input id="dither" type="checkbox"> Dithering</label>
+    <button id="print">Skriv ut</button>
+  </div>
+
+  <div id="result">
+    <div id="info"></div>
+    <div id="wrap"><canvas id="out"></canvas></div>
+    <ul id="legend"></ul>
+  </div>
+</main>
+
+<script>
+// Typiska pärlfärger (Hama-liknande). [namn, hex]
+const PALETTE = [
+  ["Vit","#f4f4f0"],["Kräm","#f3e6b8"],["Gul","#f5d800"],["Orange","#f06a1d"],["Röd","#c8102e"],
+  ["Rosa","#f4a6c0"],["Lila","#7b3f9e"],["Ljuslila","#b79ad3"],["Blå","#1d4fa3"],["Ljusblå","#4ea5dc"],
+  ["Turkos","#0aa3a8"],["Grön","#1f9d55"],["Ljusgrön","#8cc63f"],["Mörkgrön","#16513a"],["Brun","#6b3e26"],
+  ["Ljusbrun","#b27a4b"],["Hud","#f1c3a0"],["Grå","#9a9a9a"],["Mörkgrå","#555555"],["Svart","#1a1a1a"],
+  ["Marinblå","#14264f"],["Mörkröd","#7a1020"],["Persika","#f7a58a"],["Pastellgul","#f7ec8a"],["Pastellgrön","#a8e0b8"],
+  ["Pastellblå","#a9cdf0"],["Pastellrosa","#f9cfe0"],["Neonrosa","#ec2f8c"],["Terrakotta","#a8553a"],["Sand","#d8c39a"],
+];
+const SYMS = "●■▲◆★✚✖♥♦♣♠○□△◇☆+xo#@%&*=?~!ABCDEFGH".split("");
+const lab = rgb => {
+  let [r,g,b] = rgb.map(v => { v/=255; return v>.04045 ? ((v+.055)/1.055)**2.4 : v/12.92; });
+  let x=(r*.4124+g*.3576+b*.1805)/.95047, y=(r*.2126+g*.7152+b*.0722), z=(r*.0193+g*.1192+b*.9505)/1.08883;
+  const f = t => t>.008856 ? Math.cbrt(t) : 7.787*t+16/116;
+  [x,y,z]=[f(x),f(y),f(z)];
+  return [116*y-16, 500*(x-y), 200*(y-z)];
+};
+const hex2rgb = h => [1,3,5].map(i => parseInt(h.substr(i,2),16));
+PALETTE.forEach(p => { p.rgb = hex2rgb(p[1]); p.lab = lab(p.rgb); });
+const dist = (a,b) => (a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2;
+
+const $ = id => document.getElementById(id);
+let img = null;
+
+function nearest(l, allowed) {
+  let best = -1, bd = Infinity;
+  for (const i of allowed) { const d = dist(l, PALETTE[i].lab); if (d < bd) { bd = d; best = i; } }
+  return best;
+}
+
+function render() {
+  if (!img) return;
+  const W = +$("w").value, H = Math.max(1, Math.round(W * img.height / img.width));
+  const tmp = document.createElement("canvas"); tmp.width = W; tmp.height = H;
+  const tc = tmp.getContext("2d", { willReadFrequently: true });
+  tc.fillStyle = "#fff"; tc.fillRect(0,0,W,H);
+  tc.imageSmoothingQuality = "high"; tc.drawImage(img, 0, 0, W, H);
+  const px = tc.getImageData(0,0,W,H).data;
+
+  const all = PALETTE.map((_,i)=>i);
+  const maxC = +$("c").value;
+  $("cv").textContent = maxC >= 30 ? "alla" : maxC;
+  const dither = $("dither").checked;
+
+  // pass 1: nearest on full palette (for color reduction)
+  const labs = [];
+  for (let i = 0; i < W*H; i++) labs.push(lab([px[i*4],px[i*4+1],px[i*4+2]]));
+  let allowed = all;
+  if (maxC < 30) {
+    const cnt = {};
+    labs.forEach(l => { const k = nearest(l, all); cnt[k] = (cnt[k]||0)+1; });
+    allowed = Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]).slice(0,maxC).map(Number);
+  }
+
+  // pass 2: map (optional Floyd–Steinberg in Lab)
+  const grid = new Array(W*H);
+  const buf = labs.map(l => l.slice());
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y*W+x, k = nearest(buf[i], allowed);
+    grid[i] = k;
+    if (dither) {
+      const e = buf[i].map((v,j) => v - PALETTE[k].lab[j]);
+      const add = (xx,yy,f) => { if (xx>=0&&xx<W&&yy<H) buf[yy*W+xx] = buf[yy*W+xx].map((v,j)=>v+e[j]*f); };
+      add(x+1,y,7/16); add(x-1,y+1,3/16); add(x,y+1,5/16); add(x+1,y+1,1/16);
+    }
+  }
+
+  // legend order: by count
+  const counts = {};
+  grid.forEach(k => counts[k] = (counts[k]||0)+1);
+  const used = Object.keys(counts).map(Number).sort((a,b)=>counts[b]-counts[a]);
+  const sym = {}; used.forEach((k,i) => sym[k] = SYMS[i % SYMS.length]);
+  const showSym = $("sym").checked;
+
+  // draw
+  const S = 24, cv = $("out");
+  cv.width = W*S; cv.height = H*S;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0,0,cv.width,cv.height);
+  g.textAlign = "center"; g.textBaseline = "middle"; g.font = `bold ${S*.5}px monospace`;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const k = grid[y*W+x], cx = x*S+S/2, cy = y*S+S/2;
+    g.fillStyle = PALETTE[k][1];
+    g.beginPath(); g.arc(cx, cy, S*.45, 0, 7); g.fill();
+    g.strokeStyle = "#0003"; g.lineWidth = 1; g.stroke();
+    g.fillStyle = "#fff"; g.beginPath(); g.arc(cx, cy, S*.1, 0, 7); g.fill();
+    if (showSym) {
+      const [r,gg,b] = PALETTE[k].rgb, dark = (r*.299+gg*.587+b*.114) < 140;
+      g.fillStyle = dark ? "#fff" : "#000";
+      g.fillText(sym[k], cx, cy + 1);
+    }
+  }
+  // grid lines: thin every bead, thick every 5, plate borders every 29
+  for (let x = 0; x <= W; x++) line(g, x*S, 0, x*S, H*S, x%29===0 ? 3 : x%5===0 ? 1.2 : 0.4, x%29===0 ? "#e4572e" : "#0006");
+  for (let y = 0; y <= H; y++) line(g, 0, y*S, W*S, y*S, y%29===0 ? 3 : y%5===0 ? 1.2 : 0.4, y%29===0 ? "#e4572e" : "#0006");
+
+  const plates = Math.ceil(W/29) * Math.ceil(H/29);
+  $("info").textContent = `${W} × ${H} pärlor · ${W*H} st · ${used.length} färger · ${plates} platta/plattor (29×29, röda linjer)`;
+  $("legend").innerHTML = used.map(k => {
+    const [r,gg,b] = PALETTE[k].rgb, dark = (r*.299+gg*.587+b*.114) < 140;
+    return `<li><span class="sw" style="background:${PALETTE[k][1]};color:${dark?"#fff":"#000"}">${showSym?sym[k]:""}</span>${PALETTE[k][0]} — <b>${counts[k]}</b></li>`;
+  }).join("");
+  $("result").style.display = "block"; $("controls").style.display = "flex";
+}
+function line(g,x1,y1,x2,y2,w,c){ g.strokeStyle=c; g.lineWidth=w; g.beginPath(); g.moveTo(x1,y1); g.lineTo(x2,y2); g.stroke(); }
+
+function load(file) {
+  if (!file || !file.type.startsWith("image/")) return;
+  const url = URL.createObjectURL(file), im = new Image();
+  im.onload = () => { img = im; render(); URL.revokeObjectURL(url); };
+  im.src = url;
+}
+
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+$("file").onchange = e => load(e.target.files[0]);
+["dragenter","dragover"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+document.addEventListener("drop", e => load(e.dataTransfer.files[0]));
+document.addEventListener("paste", e => { const f = [...e.clipboardData.files][0]; if (f) load(f); });
+$("w").oninput = () => { $("wv").textContent = $("w").value; render(); };
+["c","sym","dither"].forEach(id => $(id).oninput = render);
+$("print").onclick = () => window.print();
+</script>
+</body>
+</html>
